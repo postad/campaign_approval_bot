@@ -32,7 +32,7 @@ def get_pending_post():
 # Send post for approval
 def send_for_approval(row_num, row_data):
     try:
-        user_id = int(row_data['approver_user_id'].replace('@', '').strip())
+        user_id = int(row_data['approver_user_id'])
         raise ValueError("approver_user_id must be Telegram numeric user ID, not username.")
     except ValueError:
         print("⚠️ 'approver_user_id' must be a Telegram numeric user ID (not @username). Update the sheet.")
