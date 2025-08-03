@@ -1,6 +1,8 @@
-
 import os
 import gspread
+import threading
+import time
+import json
 from oauth2client.service_account import ServiceAccountCredentials
 import telebot
 from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton
@@ -13,7 +15,6 @@ CREDENTIALS_JSON = os.environ.get("GOOGLE_CREDENTIALS_JSON")
 bot = telebot.TeleBot(BOT_TOKEN)
 
 # Setup Google Sheets
-import json
 creds_dict = json.loads(CREDENTIALS_JSON)
 scope = ['https://spreadsheets.google.com/feeds', 'https://www.googleapis.com/auth/drive']
 creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
@@ -30,7 +31,13 @@ def get_pending_post():
 
 # Send post for approval
 def send_for_approval(row_num, row_data):
-    user_id = int(row_data['approver_user_id'])
+    try:
+        user_id = int(row_data['approver_user_id'].replace('@', '').strip())
+        raise ValueError("approver_user_id must be Telegram numeric user ID, not username.")
+    except ValueError:
+        print("⚠️ 'approver_user_id' must be a Telegram numeric user ID (not @username). Update the sheet.")
+        return
+
     text = row_data['text']
     media_type = row_data['media_type']
     file_id = row_data['media_file_id']
@@ -51,6 +58,9 @@ def send_for_approval(row_num, row_data):
     else:
         bot.send_message(user_id, text, reply_markup=markup)
 
+    print(f"📤 Sent post {post_id} for approval to {user_id}")
+    sheet.update_cell(row_num, 12, "sent_for_approval")
+
 # Callback handler
 @bot.callback_query_handler(func=lambda call: True)
 def handle_callback(call):
@@ -59,6 +69,7 @@ def handle_callback(call):
         action, row_num, post_id = data.split("_")
         row_num = int(row_num)
         row = sheet.row_values(row_num)
+
         post_text = row[6]
         media_type = row[7]
         media_file_id = row[8]
@@ -66,9 +77,10 @@ def handle_callback(call):
         cta_url = row[10]
         channel_id = row[2]
 
+        markup = InlineKeyboardMarkup()
+        markup.add(InlineKeyboardButton(cta_text, url=cta_url))
+
         if action == "approve":
-            markup = InlineKeyboardMarkup()
-            markup.add(InlineKeyboardButton(cta_text, url=cta_url))
             if media_type == 'photo':
                 bot.send_photo(channel_id, media_file_id, caption=post_text, reply_markup=markup)
             elif media_type == 'video':
@@ -76,25 +88,14 @@ def handle_callback(call):
             else:
                 bot.send_message(channel_id, post_text, reply_markup=markup)
             sheet.update_cell(row_num, 12, "posted")
+            print(f"✅ Post {post_id} approved and sent to channel")
             bot.answer_callback_query(call.id, "✅ Post published")
         else:
             sheet.update_cell(row_num, 12, "rejected")
+            print(f"❌ Post {post_id} rejected")
             bot.answer_callback_query(call.id, "❌ Post rejected")
 
-# Command to start processing
-@bot.message_handler(commands=['process'])
-def process_pending(message):
-    row_num, row_data = get_pending_post()
-    if row_data:
-        send_for_approval(row_num, row_data)
-        bot.reply_to(message, "📤 Sent for approval")
-    else:
-        bot.reply_to(message, "✅ No pending posts.")
-
-print("🤖 Campaign Publisher Bot is running...")
-import threading
-import time
-
+# Background loop to check for pending posts
 def check_pending_loop():
     while True:
         row_num, row_data = get_pending_post()
@@ -103,7 +104,8 @@ def check_pending_loop():
             send_for_approval(row_num, row_data)
         time.sleep(10)
 
+# Start the bot
+print("🤖 Campaign Publisher Bot is running...")
 threading.Thread(target=check_pending_loop, daemon=True).start()
-
 bot.remove_webhook()
 bot.infinity_polling()
