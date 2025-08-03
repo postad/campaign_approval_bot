@@ -1,116 +1,116 @@
 import os
 import time
 import threading
-import telebot
 import gspread
-from dotenv import load_dotenv
-from google.oauth2.service_account import Credentials
-from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton
+from oauth2client.service_account import ServiceAccountCredentials
+from telebot import TeleBot, types
 
-load_dotenv()
-
+# קריאת משתני סביבה ישירות מ-Railway
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 SHEET_ID = os.getenv("SHEET_ID")
-CREDENTIALS_JSON = os.getenv("GOOGLE_CREDENTIALS_JSON")
+APPROVER_ID = int(os.getenv("APPROVER_ID"))
+CREDENTIALS_PATH = "credentials.json"
 
-# --- Google Auth
-import json
-creds_dict = json.loads(CREDENTIALS_JSON)
-creds = Credentials.from_service_account_info(creds_dict, scopes=["https://www.googleapis.com/auth/spreadsheets"])
+bot = TeleBot(BOT_TOKEN)
+
+# התחברות לגוגל שיט
+scope = ['https://spreadsheets.google.com/feeds',
+         'https://www.googleapis.com/auth/drive']
+creds = ServiceAccountCredentials.from_json_keyfile_name(CREDENTIALS_PATH, scope)
 gc = gspread.authorize(creds)
-sheet = gc.open_by_key(SHEET_ID).worksheet("campaign_posts")
-
-bot = telebot.TeleBot(BOT_TOKEN)
+sheet = gc.open_by_key(SHEET_ID).sheet1
 
 def get_pending_post():
-    data = sheet.get_all_records()
-    for i, row in enumerate(data, start=2):
-        if row["status"].lower() == "pending":
-            return i, row
+    rows = sheet.get_all_records()
+    for idx, row in enumerate(rows, start=2):
+        if row.get("status", "").lower() == "pending":
+            return idx, row
     return None, None
 
-def update_status(row_num, status):
-    sheet.update_cell(row_num, 7, status)
+def update_status(row_num, new_status):
+    sheet.update_cell(row_num, 7, new_status)  # עמודה G = status
 
-def parse_text_and_url(text):
-    parts = text.strip().split()
-    if parts and parts[-1].startswith("http"):
-        return " ".join(parts[:-1]), parts[-1]
-    return text, None
+def extract_url_from_text(text):
+    words = text.strip().split()
+    for word in reversed(words):
+        if word.startswith("http://") or word.startswith("https://"):
+            return word, " ".join(words[:-1])
+    return "", text
 
 def send_for_approval(row_num, row_data):
-    text_body, url = parse_text_and_url(row_data["text"])
-    approver_id = int(row_data["approver_id"])
+    channel = row_data["channel"]
+    text = row_data["text"]
+    media_id = row_data.get("media_id", "")
     post_id = row_data["post_id"]
 
-    markup = InlineKeyboardMarkup()
-    markup.row(
-        InlineKeyboardButton("✅ לאשר", callback_data=f"approve_{row_num}_{post_id}"),
-        InlineKeyboardButton("❌ לדחות", callback_data=f"reject_{row_num}_{post_id}")
-    )
+    url, caption = extract_url_from_text(text)
 
-    if row_data["media_type"] == "image":
-        try:
-            bot.send_photo(
-                approver_id,
-                row_data["media_id"],
-                caption=f"{text_body}\n\n{url if url else ''}".strip(),
-                reply_markup=markup
-            )
-        except Exception as e:
-            print(f"⚠️ Failed to send photo: {e}")
-    else:
-        bot.send_message(approver_id, f"{text_body}\n\n{url if url else ''}".strip(), reply_markup=markup)
-
-    print(f"📨 Sending post {post_id} to approver {approver_id}")
-
-def publish_post(row_data):
-    text_body, url = parse_text_and_url(row_data["text"])
-    full_text = f"{text_body}\n\n{url if url else ''}".strip()
+    markup = types.InlineKeyboardMarkup()
+    markup.add(types.InlineKeyboardButton("✅ אישור", callback_data=f"approve_{row_num}_{post_id}"))
+    markup.add(types.InlineKeyboardButton("❌ דחייה", callback_data=f"reject_{row_num}_{post_id}"))
 
     try:
-        if row_data["media_type"] == "image":
-            bot.send_photo(row_data["channel_username"], row_data["media_id"], caption=full_text)
+        if media_id:
+            bot.send_photo(APPROVER_ID, media_id, caption=caption + f"\n\n{url}", reply_markup=markup)
         else:
-            bot.send_message(row_data["channel_username"], full_text)
+            bot.send_message(APPROVER_ID, caption + f"\n\n{url}", reply_markup=markup)
+    except Exception as e:
+        print(f"⚠️ Failed to send for approval: {e}")
 
-        print(f"✅ Approved post {row_data['post_id']} -> sent to channel {row_data['channel_username']}")
+def publish_post(channel, media_id, text):
+    url, caption = extract_url_from_text(text)
+    try:
+        if media_id:
+            bot.send_photo(f"@{channel}", media_id, caption=caption + f"\n\n{url}")
+        else:
+            bot.send_message(f"@{channel}", caption + f"\n\n{url}")
         return True
     except Exception as e:
         print(f"⚠️ Failed to publish post: {e}")
         return False
 
-@bot.callback_query_handler(func=lambda call: True)
-def callback_handler(call):
-    print(f"🔁 Callback received: {call.data}")
-    if call.data.startswith("approve_"):
+@bot.callback_query_handler(func=lambda call: call.data.startswith("approve_"))
+def handle_approve(call):
+    try:
         _, row_num, post_id = call.data.split("_")
         row_num = int(row_num)
         row_data = sheet.row_values(row_num)
         headers = sheet.row_values(1)
-        row_dict = dict(zip(headers, row_data))
-        success = publish_post(row_dict)
+        data = dict(zip(headers, row_data))
+
+        print(f"✅ Approved post {post_id} -> sending to channel {data['channel']}")
+
+        success = publish_post(data["channel"], data.get("media_id", ""), data["text"])
         if success:
             update_status(row_num, "approved")
-    elif call.data.startswith("reject_"):
-        _, row_num, post_id = call.data.split("_")
-        update_status(int(row_num), "rejected")
-        print(f"❌ Rejected post {post_id}")
+            bot.send_message(APPROVER_ID, f"✅ פוסט {post_id} פורסם בהצלחה.")
+        else:
+            bot.send_message(APPROVER_ID, f"❌ לא הצלחנו לפרסם את הפוסט {post_id}.")
+    except Exception as e:
+        print(f"⚠️ Error in approval callback: {e}")
 
-def check_pending_loop():
-    already_sent = set()
+@bot.callback_query_handler(func=lambda call: call.data.startswith("reject_"))
+def handle_reject(call):
+    try:
+        _, row_num, post_id = call.data.split("_")
+        row_num = int(row_num)
+        update_status(row_num, "rejected")
+        bot.send_message(APPROVER_ID, f"🚫 פוסט {post_id} נדחה.")
+    except Exception as e:
+        print(f"⚠️ Error in rejection callback: {e}")
+
+def check_loop():
     while True:
         row_num, row_data = get_pending_post()
-        if row_data and row_data["post_id"] not in already_sent:
+        if row_data:
             print(f"📤 Found pending post: {row_data['post_id']}")
             send_for_approval(row_num, row_data)
-            already_sent.add(row_data["post_id"])
-        time.sleep(10)
+            time.sleep(5)  # כדי למנוע שליחה כפולה
+        else:
+            time.sleep(10)
 
-# --- Start Bot
+# Start
 print("🤖 Campaign Publisher Bot is running...")
-
-threading.Thread(target=check_pending_loop, daemon=True).start()
-
+threading.Thread(target=check_loop, daemon=True).start()
 bot.remove_webhook()
 bot.infinity_polling()
