@@ -92,5 +92,18 @@ def process_pending(message):
         bot.reply_to(message, "✅ No pending posts.")
 
 print("🤖 Campaign Publisher Bot is running...")
+import threading
+import time
+
+def check_pending_loop():
+    while True:
+        row_num, row_data = get_pending_post()
+        if row_data:
+            print(f"📤 Found pending post: {row_data['post_id']}")
+            send_for_approval(row_num, row_data)
+        time.sleep(10)
+
+threading.Thread(target=check_pending_loop, daemon=True).start()
+
 bot.remove_webhook()
 bot.infinity_polling()
