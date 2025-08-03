@@ -14,7 +14,7 @@ CREDENTIALS_PATH = "credentials.json"
 bot = telebot.TeleBot(BOT_TOKEN, parse_mode='HTML')
 
 # Connect to Google Sheet
-gc = gspread.service_account(filename=CREDENTIALS_PATH)
+gc = gspread.authorize(creds)
 sheet = gc.open_by_key(SHEET_ID).sheet1
 
 # Helper: Get pending post
