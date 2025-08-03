@@ -1,0 +1,1 @@
+worker: python campaign_publisher.py
